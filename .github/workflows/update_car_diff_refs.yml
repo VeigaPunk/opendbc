@@ -1,0 +1,35 @@
+name: update car diff refs
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - update-refs-workflow
+
+jobs:
+  update_refs:
+    name: update refs
+    runs-on: ${{ github.repository == 'commaai/opendbc' && 'namespace-profile-amd64-8x16' || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v4
+    - name: Generate refs for all platforms
+      run: source setup.sh && python opendbc/car/tests/car_diff.py --update-refs --all
+    - name: Checkout ci-artifacts
+      uses: actions/checkout@v4
+      with:
+        repository: commaai/ci-artifacts
+        ssh-key: ${{ secrets.CI_ARTIFACTS_DEPLOY_KEY }}
+        path: ${{ github.workspace }}/ci-artifacts
+    - name: Push refs
+      working-directory: ${{ github.workspace }}/ci-artifacts
+      run: |
+        ls ${{ github.workspace }}/car_diff/*.zst
+        git config user.name "GitHub Actions Bot"
+        git config user.email "<>"
+        git fetch origin car_diff || true
+        git checkout car_diff 2>/dev/null || git checkout --orphan car_diff
+        cp ${{ github.workspace }}/car_diff/*.zst .
+        git add *.zst
+        git commit -m "car_diff refs for ${{ github.sha }} (manual full regen)" || echo "No changes to commit"
+        git push origin car_diff
