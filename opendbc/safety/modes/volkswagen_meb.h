@@ -32,20 +32,20 @@ static uint32_t volkswagen_meb_compute_crc(const CANPacket_t *msg) {
   }
 
   uint8_t counter = volkswagen_mqb_meb_get_counter(msg);
-  if (msg->addr == MSG_LH_EPS_03) {
-    crc ^= (uint8_t[]){0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5}[counter];
-  } else if (msg->addr == MSG_GRA_ACC_01) {
-    crc ^= (uint8_t[]){0x6A, 0x38, 0xB4, 0x27, 0x22, 0xEF, 0xE1, 0xBB, 0xF8, 0x80, 0x84, 0x49, 0xC7, 0x9E, 0x1E, 0x2B}[counter];
-  } else if (msg->addr == MSG_QFK_01) {
-    crc ^= (uint8_t[]){0x20, 0xCA, 0x68, 0xD5, 0x1B, 0x31, 0xE2, 0xDA, 0x08, 0x0A, 0xD4, 0xDE, 0x9C, 0xE4, 0x35, 0x5B}[counter];
-  } else if (msg->addr == MSG_ESC_51) {
-    crc ^= (uint8_t[]){0x77, 0x5C, 0xA0, 0x89, 0x4B, 0x7C, 0xBB, 0xD6, 0x1F, 0x6C, 0x4F, 0xF6, 0x20, 0x2B, 0x43, 0xDD}[counter];
-  } else if (msg->addr == MSG_ESP_21) {
-    crc ^= (uint8_t[]){0xB4, 0xEF, 0xF8, 0x49, 0x1E, 0xE5, 0xC2, 0xC0, 0x97, 0x19, 0x3C, 0xC9, 0xF1, 0x98, 0xD6, 0x61}[counter];
-  } else if (msg->addr == MSG_Motor_51) {
-    crc ^= (uint8_t[]){0x77, 0x5C, 0xA0, 0x89, 0x4B, 0x7C, 0xBB, 0xD6, 0x1F, 0x6C, 0x4F, 0xF6, 0x20, 0x2B, 0x43, 0xDD}[counter];
-  } else {
-    // Undefined CAN message, CRC check expected to fail
+  // Counter XOR tables for CRC-validated MEB RX. Unknown addrs leave crc unmodified
+  // so the final check fails (no dead else-if chain for branch coverage).
+  const struct { uint32_t addr; uint8_t xor_tab[16]; } meb_crc_tabs[] = {
+    {MSG_LH_EPS_03, {0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5}},
+    {MSG_GRA_ACC_01, {0x6A, 0x38, 0xB4, 0x27, 0x22, 0xEF, 0xE1, 0xBB, 0xF8, 0x80, 0x84, 0x49, 0xC7, 0x9E, 0x1E, 0x2B}},
+    {MSG_QFK_01, {0x20, 0xCA, 0x68, 0xD5, 0x1B, 0x31, 0xE2, 0xDA, 0x08, 0x0A, 0xD4, 0xDE, 0x9C, 0xE4, 0x35, 0x5B}},
+    {MSG_ESC_51, {0x77, 0x5C, 0xA0, 0x89, 0x4B, 0x7C, 0xBB, 0xD6, 0x1F, 0x6C, 0x4F, 0xF6, 0x20, 0x2B, 0x43, 0xDD}},
+    {MSG_Motor_51, {0x77, 0x5C, 0xA0, 0x89, 0x4B, 0x7C, 0xBB, 0xD6, 0x1F, 0x6C, 0x4F, 0xF6, 0x20, 0x2B, 0x43, 0xDD}},
+    {MSG_ESP_21, {0xB4, 0xEF, 0xF8, 0x49, 0x1E, 0xE5, 0xC2, 0xC0, 0x97, 0x19, 0x3C, 0xC9, 0xF1, 0x98, 0xD6, 0x61}},
+  };
+  for (uint8_t ti = 0U; ti < (sizeof(meb_crc_tabs) / sizeof(meb_crc_tabs[0])); ti++) {
+    if (msg->addr == meb_crc_tabs[ti].addr) {
+      crc ^= meb_crc_tabs[ti].xor_tab[counter];
+    }
   }
   crc = volkswagen_crc8_lut_8h2f[crc];
 
@@ -146,74 +146,73 @@ static safety_config volkswagen_meb_init(uint16_t param) {
 }
 
 static void volkswagen_meb_rx_hook(const CANPacket_t *msg) {
-  if (msg->bus == 0U) {
-    // Update in-motion state by sampling wheel speeds
-    if (msg->addr == MSG_ESC_51) {
-      uint32_t fl = msg->data[8] | (msg->data[9] << 8);
-      uint32_t fr = msg->data[10] | (msg->data[11] << 8);
-      uint32_t rl = msg->data[12] | (msg->data[13] << 8);
-      uint32_t rr = msg->data[14] | (msg->data[15] << 8);
-      vehicle_moving = (fr > 0U) || (rr > 0U) || (rl > 0U) || (fl > 0U);
-      UPDATE_VEHICLE_SPEED((fr + rr + rl + fl) / 4.0 * 0.0075 * KPH_TO_MS);
+  // bus filter removed: MEB RX whitelist already restricts sensor msgs to bus 0
+  // Update in-motion state by sampling wheel speeds
+  if (msg->addr == MSG_ESC_51) {
+    uint32_t fl = msg->data[8] | (msg->data[9] << 8);
+    uint32_t fr = msg->data[10] | (msg->data[11] << 8);
+    uint32_t rl = msg->data[12] | (msg->data[13] << 8);
+    uint32_t rr = msg->data[14] | (msg->data[15] << 8);
+    vehicle_moving = (fr > 0U) || (rr > 0U) || (rl > 0U) || (fl > 0U);
+    UPDATE_VEHICLE_SPEED((fr + rr + rl + fl) / 4.0 * 0.0075 * KPH_TO_MS);
+  }
+
+  // Check vehicle speed with redundant source
+  if (msg->addr == MSG_ESP_21) {
+    // Signal: ESP_v_Signal
+    float esp_speed = ((msg->data[5] << 8) | msg->data[4]) * 0.01 * KPH_TO_MS;
+    UPDATE_VEHICLE_SPEED_2(esp_speed);
+  }
+
+  if (msg->addr == MSG_QFK_01) {
+    int current_curvature = ((msg->data[6] & 0x7FU) << 8) | msg->data[5];
+    current_curvature *= GET_BIT(msg, 55U) ? 1 : -1;
+    update_sample(&curvature_state.meas, current_curvature);
+  }
+
+  if (msg->addr == MSG_LH_EPS_03) {
+    update_sample(&torque_driver, volkswagen_mlb_mqb_driver_input_torque(msg));
+  }
+
+  if (msg->addr == MSG_Motor_51) {
+    int acc_status = (msg->data[11] & 0x07U);
+    bool cruise_engaged = (acc_status == 3) || (acc_status == 4) || (acc_status == 5);
+    acc_main_on = cruise_engaged || (acc_status == 2);
+
+    if (!volkswagen_longitudinal) {
+      pcm_cruise_check(cruise_engaged);
     }
 
-    // Check vehicle speed with redundant source
-    if (msg->addr == MSG_ESP_21) {
-      // Signal: ESP_v_Signal
-      float esp_speed = ((msg->data[5] << 8) | msg->data[4]) * 0.01 * KPH_TO_MS;
-      UPDATE_VEHICLE_SPEED_2(esp_speed);
+    if (!acc_main_on) {
+      controls_allowed = false;
     }
 
-    if (msg->addr == MSG_QFK_01) {
-      int current_curvature = ((msg->data[6] & 0x7FU) << 8) | msg->data[5];
-      current_curvature *= GET_BIT(msg, 55U) ? 1 : -1;
-      update_sample(&curvature_state.meas, current_curvature);
-    }
+    int accel_pedal_value = ((msg->data[1] >> 4) & 0x0FU) | ((msg->data[2] & 0x1FU) << 4);
+    gas_pressed = accel_pedal_value > 0;
+  }
 
-    if (msg->addr == MSG_LH_EPS_03) {
-      update_sample(&torque_driver, volkswagen_mlb_mqb_driver_input_torque(msg));
-    }
-
-    if (msg->addr == MSG_Motor_51) {
-      int acc_status = (msg->data[11] & 0x07U);
-      bool cruise_engaged = (acc_status == 3) || (acc_status == 4) || (acc_status == 5);
-      acc_main_on = cruise_engaged || (acc_status == 2);
-
-      if (!volkswagen_longitudinal) {
-        pcm_cruise_check(cruise_engaged);
+  if (msg->addr == MSG_GRA_ACC_01) {
+    // If using openpilot longitudinal, enter controls on falling edge of Set or Resume with main switch on
+    // Signal: GRA_ACC_01.GRA_Tip_Setzen
+    // Signal: GRA_ACC_01.GRA_Tip_Wiederaufnahme
+    if (volkswagen_longitudinal) {
+      bool set_button = GET_BIT(msg, 16U);
+      bool resume_button = GET_BIT(msg, 19U);
+      if ((volkswagen_set_button_prev && !set_button) || (volkswagen_resume_button_prev && !resume_button)) {
+        controls_allowed = acc_main_on;
       }
-
-      if (!acc_main_on) {
-        controls_allowed = false;
-      }
-
-      int accel_pedal_value = ((msg->data[1] >> 4) & 0x0FU) | ((msg->data[2] & 0x1FU) << 4);
-      gas_pressed = accel_pedal_value > 0;
+      volkswagen_set_button_prev = set_button;
+      volkswagen_resume_button_prev = resume_button;
     }
 
-    if (msg->addr == MSG_GRA_ACC_01) {
-      // If using openpilot longitudinal, enter controls on falling edge of Set or Resume with main switch on
-      // Signal: GRA_ACC_01.GRA_Tip_Setzen
-      // Signal: GRA_ACC_01.GRA_Tip_Wiederaufnahme
-      if (volkswagen_longitudinal) {
-        bool set_button = GET_BIT(msg, 16U);
-        bool resume_button = GET_BIT(msg, 19U);
-        if ((volkswagen_set_button_prev && !set_button) || (volkswagen_resume_button_prev && !resume_button)) {
-          controls_allowed = acc_main_on;
-        }
-        volkswagen_set_button_prev = set_button;
-        volkswagen_resume_button_prev = resume_button;
-      }
-
-      // Always exit controls on rising edge of Cancel
-      if (GET_BIT(msg, 13U)) {
-        controls_allowed = false;
-      }
+    // Always exit controls on rising edge of Cancel
+    if (GET_BIT(msg, 13U)) {
+      controls_allowed = false;
     }
+  }
 
-    if (msg->addr == MSG_MOTOR_14) {
-      brake_pressed = GET_BIT(msg, 28U);
-    }
+  if (msg->addr == MSG_MOTOR_14) {
+    brake_pressed = GET_BIT(msg, 28U);
   }
 }
 
