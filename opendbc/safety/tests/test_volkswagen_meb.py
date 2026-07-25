@@ -97,6 +97,13 @@ class TestVolkswagenMebSafetyBase(common.CarSafetyTest, common.CurvatureSteering
     values = {f"{s}_Radgeschw": spd_kph for s in ("VL", "VR", "HL", "HR")}
     return self.packer.make_can_msg_safety("ESC_51", 0, values)
 
+  def test_vehicle_moving_single_wheel(self):
+    # exercise each wheel's || operand in the vehicle moving check
+    for speeds in [(0, 0, 0, 0), (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]:
+      values = {f"{w}_Radgeschw": v for w, v in zip(("VL", "VR", "HL", "HR"), speeds)}
+      self._rx(self.packer.make_can_msg_safety("ESC_51", 0, values))
+      self.assertEqual(any(speeds), self.safety.get_vehicle_moving())
+
   def _speed_msg_2(self, speed_mps: float):
     values = {"ESP_v_Signal": speed_mps * 3.6}
     return self.packer.make_can_msg_safety("ESP_21", 0, values)
@@ -135,11 +142,12 @@ class TestVolkswagenMebSafetyBase(common.CarSafetyTest, common.CurvatureSteering
     values = {"ACC_Sollbeschleunigung_02": accel}
     return self.packer.make_can_msg_safety("ACC_18", 0, values)
 
-  def _tsk_status_msg(self, enable, main_switch=True):
-    if main_switch:
-      tsk_status = 3 if enable else 2
-    else:
-      tsk_status = 0
+  def _tsk_status_msg(self, enable, main_switch=True, tsk_status=None):
+    if tsk_status is None:
+      if main_switch:
+        tsk_status = 3 if enable else 2
+      else:
+        tsk_status = 0
     values = {"TSK_Status": tsk_status}
     return self.packer.make_can_msg_safety("Motor_51", 0, values)
 
@@ -246,6 +254,12 @@ class TestVolkswagenMebStockSafety(TestVolkswagenMebSafetyBase):
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.volkswagenMeb, 0)
     self.safety.init_tests()
+
+  def test_cruise_engaged_all_states(self):
+    for tsk_status in (3, 4, 5):
+      self._rx(self._tsk_status_msg(False))
+      self._rx(self._tsk_status_msg(True, tsk_status=tsk_status))
+      self.assertTrue(self.safety.get_controls_allowed(), f"controls not allowed for TSK_Status={tsk_status}")
 
   def test_spam_cancel_safety_check(self):
     self.safety.set_controls_allowed(0)
@@ -374,6 +388,13 @@ class TestVolkswagenMebIgnition(unittest.TestCase):
     self.assertTrue(self.safety.get_ignition_can())
     self.safety.ignition_can_hook(self._msg(2, 0))
     self.safety.ignition_can_hook(self._msg(3, 0))
+    self.assertFalse(self.safety.get_ignition_can())
+
+  def test_ignition_wrong_len_ignored(self):
+    self.safety.ignition_can_hook(self._msg(0, 1))
+    msg = self._msg(1, 1)
+    msg[0].data_len_code = 3
+    self.safety.ignition_can_hook(msg)
     self.assertFalse(self.safety.get_ignition_can())
 
 
