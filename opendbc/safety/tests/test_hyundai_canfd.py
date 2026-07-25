@@ -284,5 +284,25 @@ class TestHyundaiCanfdLFASteeringLongAltButtons(TestHyundaiCanfdLFASteeringLongB
     pass
 
 
+@parameterized_class(ALL_GAS_EV_HYBRID_COMBOS)
+class TestHyundaiCanfdLFASteeringLongPauseResume(TestHyundaiCanfdLFASteeringLongBase):
+  # CAN FD cars with a pause/resume button and a main button that toggles cruise (commaai/openpilot#30950)
+  MAIN_TOGGLE_CRUISE = True
+  PAUSE_RESUME = True
+
+  @classmethod
+  def setUpClass(cls):
+    if cls.__name__ == "TestHyundaiCanfdLFASteeringLongPauseResume":
+      cls.safety = None
+      raise unittest.SkipTest
+
+  def setUp(self):
+    self.packer = CANPackerSafety("hyundai_canfd_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiCanfd, HyundaiSafetyFlags.LONG |
+                                 HyundaiSafetyFlags.MAIN_TOGGLE_CRUISE | HyundaiSafetyFlags.PAUSE_RESUME | self.SAFETY_PARAM)
+    self.safety.init_tests()
+
+
 if __name__ == "__main__":
   unittest.main()

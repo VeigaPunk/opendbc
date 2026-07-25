@@ -66,6 +66,10 @@ class HyundaiSafetyFlags(IntFlag):
   CANFD_LKA_STEER_MSG_ALT = 128
   FCEV_GAS = 256
   ALT_LIMITS_2 = 512
+  # main button toggles cruise: enables on the first rising edge in addition to gating availability
+  MAIN_TOGGLE_CRUISE = 1024
+  # cancel button is a pause/resume toggle rather than a dedicated cancel
+  PAUSE_RESUME = 2048
 
 
 # Hyundai/Kia/Genesis SCC (Smart Cruise Control) and steering architecture:
@@ -146,6 +150,11 @@ class HyundaiFlags(IntFlag):
   FCEV = 2 ** 25
 
   ALT_LIMITS_2 = 2 ** 26
+
+  # The cancel button is a pause/resume toggle on these cars, and the main button toggles cruise.
+  # TODO(commaai/openpilot#30950): we currently cannot reliably differentiate these cars,
+  # detection needs route data from the affected platforms
+  PAUSE_RESUME = 2 ** 27
 
 
 @dataclass
