@@ -320,6 +320,97 @@ class TestCarModelBase(unittest.TestCase):
     test_car_controller(CC.as_reader())
 
   @fuzzy_test(max_examples=300)
+  def test_panda_safety_tx_fuzzy(self, fuzzy):
+    """
+      For each example, draw a randomized controls state and a sequence of randomized
+      CarControl inputs, run openpilot's CarController to generate tx CAN messages,
+      and assert panda safety accepts everything openpilot wants to send given the
+      matching control state. This catches tx mismatches between openpilot and panda
+      (e.g. panda blocking a message openpilot believes is allowed, or openpilot
+      sending actuation while controls are not allowed).
+    """
+    if self.CP.dashcamOnly:
+      self.skipTest("no need to check panda safety for dashcamOnly")
+    if self.CP.notCar:
+      self.skipTest("skipping test for notCar")
+    if self.CP.flags & ToyotaFlags.SECOC:
+      self.skipTest("SecOC transmit tests require the vehicle key")
+
+    # Randomize the controls state for this example. Extend this section to cover
+    # more state (e.g. standstill, gas/brake pressed) as needed.
+    enabled = fuzzy.boolean()
+    lat_active = enabled and fuzzy.boolean()
+    long_active = enabled and fuzzy.boolean()
+    # openpilot only requests a resume while controls are allowed, but can
+    # request a cancel any time PCM cruise is (still) engaged
+    resume = enabled and fuzzy.boolean()
+    cancel = fuzzy.boolean()
+
+    # Randomize the per-frame actuator/HUD requests. Ranges are intentionally wide
+    # (not limited to what controls would normally request): the CarController must
+    # rate-limit/clip requests into whatever panda safety allows.
+    frames = fuzzy.list(lambda: (
+      fuzzy.float(-1, 1),            # actuators.torque
+      fuzzy.float(-500, 500),        # actuators.steeringAngleDeg
+      fuzzy.float(-0.05, 0.05),      # actuators.curvature
+      fuzzy.float(-4, 2),            # actuators.accel
+      fuzzy.boolean(),               # leftBlinker
+      fuzzy.boolean(),               # rightBlinker
+    ), min_size=10, max_size=20)
+
+    # fully reset panda safety state (including rate-limit counters and the
+    # microsecond timer) so examples are independent of each other
+    cfg = self.CP.safetyConfigs[-1]
+    set_status = self.safety.set_safety_hooks(cfg.safetyModel.raw, cfg.safetyParam)
+    self.assertEqual(0, set_status, f"failed to set safetyModel {cfg}")
+    self.safety.init_tests()
+
+    # panda sees the car the same way openpilot does: PCM cruise is engaged
+    # (it only disengages shortly after openpilot requests a cancel)
+    self.safety.set_cruise_engaged_prev(True)
+    self.safety.set_controls_allowed(enabled)
+
+    CI = self.CarInterface(self.CP.copy())
+    now_nanos = 0
+    msgs_sent = 0
+    for torque_req, angle_req, curvature_req, accel_req, left_blinker, right_blinker in frames:
+      # Respect the CarControl contract from controlsd: actuator requests are
+      # neutral/zero unless the corresponding control path is active
+      torque = torque_req if lat_active else 0.0
+      angle = angle_req if lat_active else 0.0
+      curvature = curvature_req if lat_active else 0.0
+      accel = accel_req if long_active else 0.0
+
+      CC = structs.CarControl(enabled=enabled, latActive=lat_active, longActive=long_active,
+                              actuators=structs.CarControl.Actuators(torque=torque, steeringAngleDeg=angle,
+                                                                     curvature=curvature, accel=accel),
+                              cruiseControl=structs.CarControl.CruiseControl(cancel=cancel, resume=resume),
+                              leftBlinker=left_blinker, rightBlinker=right_blinker).as_reader()
+
+      CS = CI.update([])
+
+      # Some tx checks are time-based, keep panda's timer in sync with openpilot's
+      self.safety.set_timer(int(now_nanos / 1e3))
+
+      # For angle-controlled cars, panda compares the commanded angle against the
+      # measured angle from rx while steering is inactive. openpilot commands the
+      # CarState angle in that case, so keep panda's measurement in sync with it.
+      if self.CP.steerControlType == SteerControlType.angle and self.CP.brand in ANGLE_DEG_TO_CAN:
+        angle_can = int(round((CS.steeringAngleDeg + CS.steeringAngleOffsetDeg) * ANGLE_DEG_TO_CAN[self.CP.brand]))
+        self.safety.set_angle_meas(angle_can - 1, angle_can + 1)
+
+      _, sendcan = CI.apply(CC, now_nanos)
+      now_nanos += int(DT_CTRL * 1e9)
+      msgs_sent += len(sendcan)
+
+      for addr, dat, bus in sendcan:
+        packet = libsafety_py.make_CANPacket(addr, bus % 4, dat)
+        self.assertTrue(self.safety.safety_tx_hook(packet),
+                        (addr, dat, bus, enabled, lat_active, long_active, cancel, resume))
+
+    self.assertGreater(msgs_sent, 0, "no tx messages generated")
+
+  @fuzzy_test(max_examples=300)
   def test_panda_safety_carstate_fuzzy(self, fuzzy):
     if self.CP.dashcamOnly:
       self.skipTest("no need to check panda safety for dashcamOnly")
