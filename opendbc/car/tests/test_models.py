@@ -16,6 +16,7 @@ from opendbc.car.can_definitions import CanData
 from opendbc.car.car_helpers import FRAME_FINGERPRINT, interfaces
 from opendbc.car.fingerprints import MIGRATION
 from opendbc.car.honda.values import HondaFlags
+from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
 from opendbc.car.logreader import LogReader
 from opendbc.car.structs import car
 from opendbc.car.tests.routes import CarTestRoute, non_tested_cars, routes
@@ -40,6 +41,10 @@ ANGLE_DEG_TO_CAN = {
 NUM_JOBS = int(os.environ.get("NUM_JOBS", "1"))
 JOB_ID = int(os.environ.get("JOB_ID", "0"))
 RELAY_TRANSITION_TIMEOUT_US = 10_000_000
+
+# controlsd clips curvature and actuator deltas; keep the TX fuzz inside the same bounds
+MAX_CURVATURE = 0.2
+NUM_TX_FUZZY_FRAMES = 20
 DOWNLOAD_CACHE_ROOT = Path(os.environ.get("COMMA_CACHE", "/tmp/comma_download_cache"))
 OPENPILOT_CI_URL = "https://commadataci.blob.core.windows.net/openpilotci"
 COMMA_API_URL = "https://api.commadotai.com"
@@ -115,7 +120,7 @@ class TestCarModelBase(unittest.TestCase):
 
     for msg in lr:
       if msg.which() == "can":
-        can_msgs.append((msg.logMonoTime, [CanData(can.address, can.dat, can.src) for can in msg.can]))
+        can_msgs.append((msg.logMonoTime, [CanData(can.address, can.dat, can.src) for msg in msg.can]))
         if len(can_msgs) <= FRAME_FINGERPRINT:
           for can in msg.can:
             if can.src < 64:
@@ -318,6 +323,73 @@ class TestCarModelBase(unittest.TestCase):
     self.safety.set_controls_allowed(True)
     CC = structs.CarControl(cruiseControl=structs.CarControl.CruiseControl(resume=True))
     test_car_controller(CC.as_reader())
+
+  @fuzzy_test(max_examples=300)
+  def test_panda_safety_tx_fuzzy(self, fuzzy):
+    """Fuzzes a sequence of CarControl through CarInterface.apply and asserts panda's
+    safety_tx_hook never blocks a message openpilot generates.
+
+    State is aligned between openpilot and panda (controls_allowed / cruise). Actuator
+    values stay inside the bounds controlsd applies before apply(), and vary across
+    frames so history-dependent TX checks (torque samples, rate limits, e.g. the
+    mismatch fixed in commaai/panda#1948) are exercised, which the fixed cases in
+    test_panda_safety_tx_cases cannot cover.
+    """
+    if self.CP.dashcamOnly:
+      self.skipTest("no need to check panda safety for dashcamOnly")
+    if self.CP.notCar:
+      self.skipTest("skipping test for notCar")
+    if self.CP.flags & ToyotaFlags.SECOC:
+      self.skipTest("SecOC transmit tests require the vehicle key")
+
+    controller_params = self.CP
+    if self.CP.brand == "volkswagen" and self.CP.flags & VolkswagenFlags.MLB and self.CP.openpilotLongitudinalControl:
+      # Some archived MLB routes record alpha longitudinal, which current MLB safety does not support.
+      controller_params = self.CarInterface.get_params(self.platform, self.fingerprint, self.CP.carFw, False, False, docs=False)
+
+    active = fuzzy.boolean()
+    self.safety.set_controls_allowed(active)
+    self.safety.set_cruise_engaged_prev(fuzzy.boolean())
+    self.safety.set_gas_pressed_prev(False)
+
+    # Fuzzy has no float strategy on purpose; scale integer draws into float ranges
+    def ffloat(lo, hi):
+      return lo + (hi - lo) * fuzzy.integer(0, 1000) / 1000
+
+    torque = angle = curvature = accel = 0.0
+    CI = self.CarInterface(controller_params)
+    now_nanos = 0
+    msgs_sent = 0
+
+    for frame in range(NUM_TX_FUZZY_FRAMES):
+      # advance panda timer so rate-limit windows see a realistic controlsd cadence
+      self.safety.set_timer(int(frame * DT_CTRL * 1e6))
+
+      if active:
+        # random walk with per-frame deltas inside controlsd's rate limits
+        torque = max(-1.0, min(1.0, torque + ffloat(-0.25, 0.25)))
+        angle = max(-180.0, min(180.0, angle + ffloat(-15.0, 15.0)))
+        curvature = max(-MAX_CURVATURE, min(MAX_CURVATURE, curvature + ffloat(-0.02, 0.02)))
+        accel = max(ACCEL_MIN, min(ACCEL_MAX, accel + ffloat(-1.0, 1.0)))
+        actuators = structs.CarControl.Actuators(torque=torque, steeringAngleDeg=angle, curvature=curvature, accel=accel,
+                                                 speed=ffloat(0.0, 40.0), gas=ffloat(0.0, 1.0), brake=ffloat(0.0, 1.0))
+      else:
+        # controlsd zeroes actuators when not active
+        actuators = structs.CarControl.Actuators()
+        torque = angle = curvature = accel = 0.0
+
+      CC = structs.CarControl(actuators=actuators, enabled=active, latActive=active, longActive=active,
+                              cruiseControl=structs.CarControl.CruiseControl(cancel=not active, resume=active))
+
+      CI.update([])
+      _, sendcan = CI.apply(CC.as_reader(), now_nanos)
+      now_nanos += DT_CTRL * 1e9
+      msgs_sent += len(sendcan)
+      for addr, dat, bus in sendcan:
+        packet = libsafety_py.make_CANPacket(addr, bus % 4, dat)
+        self.assertTrue(self.safety.safety_tx_hook(packet), (addr, dat, bus, active, frame))
+
+    self.assertGreater(msgs_sent, 0)
 
   @fuzzy_test(max_examples=300)
   def test_panda_safety_carstate_fuzzy(self, fuzzy):
