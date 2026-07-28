@@ -120,7 +120,7 @@ class TestCarModelBase(unittest.TestCase):
 
     for msg in lr:
       if msg.which() == "can":
-        can_msgs.append((msg.logMonoTime, [CanData(can.address, can.dat, can.src) for msg in msg.can]))
+        can_msgs.append((msg.logMonoTime, [CanData(can.address, can.dat, can.src) for can in msg.can]))
         if len(can_msgs) <= FRAME_FINGERPRINT:
           for can in msg.can:
             if can.src < 64:
