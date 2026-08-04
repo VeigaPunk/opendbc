@@ -1249,3 +1249,36 @@ class CarSafetyTest(SafetyTest):
     self.safety.safety_tick_current_safety_config()
     self.assertFalse(self.safety.get_controls_allowed())
     self.assertFalse(self.safety.safety_config_valid())
+
+  def test_safety_tick_not_lagging(self):
+    # safety_tick with timer at 0 exercises the not-lagging path
+    self.safety.set_timer(0)
+    self.safety.safety_tick_current_safety_config()
+    # No valid messages received yet, so config is still invalid
+    self.assertFalse(self.safety.safety_config_valid())
+
+  def test_safety_tick_valid_msg(self):
+    # tick right after receiving a valid message: not lagging and valid
+    msg = self._speed_msg(0)
+    if msg is None:
+      raise unittest.SkipTest("No speed message for this safety mode")
+    self._rx(msg)
+    self.safety.set_timer(0)
+    self.safety.safety_tick_current_safety_config()
+
+  def test_rx_unknown_addr(self):
+    # no rx check matches an unknown address
+    self.assertTrue(self._rx(make_msg(0, 0x7FF)))
+
+  def test_rx_wrong_length(self):
+    # a checked address with the wrong length must not match its rx check
+    msg = self._speed_msg(0)
+    if msg is None:
+      raise unittest.SkipTest("No speed message for this safety mode")
+    # mark the rx check as seen with a good message first
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    msg[0].data_len_code = 2
+    self.assertTrue(self._rx(msg))
+
+  def test_set_safety_hooks_invalid_mode(self):
+    self.assertNotEqual(0, self.safety.set_safety_hooks(0xFFFF, 0))

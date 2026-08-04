@@ -164,6 +164,13 @@ class TestRivianIgnition(unittest.TestCase):
       self.safety.ignition_can_hook(self._msg((i + 1) % 15, 1))
       self.assertTrue(self.safety.get_ignition_can())
 
+  def test_ignition_wrong_len_ignored(self):
+    self.safety.ignition_can_hook(self._msg(0, 1))
+    msg = self._msg(1, 1)
+    msg[0].data_len_code = 7
+    self.safety.ignition_can_hook(msg)
+    self.assertFalse(self.safety.get_ignition_can())
+
   def test_ignition_off(self):
     self.safety.ignition_can_hook(self._msg(0, 1))
     self.safety.ignition_can_hook(self._msg(1, 1))

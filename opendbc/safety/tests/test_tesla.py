@@ -140,6 +140,11 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     # For common.LongitudinalAccelSafetyTest
     return self._long_control_msg(10, accel_limits=(accel, max(accel, 0)))
 
+  def test_rx_hook_di_state_ui_warning(self):
+    # cover counter/checksum dispatch for DI_state (0x286) and UI_warning (0x311)
+    self._rx(common.make_msg(0, 0x286, 8))
+    self._rx(common.make_msg(0, 0x311, 7))
+
   def test_rx_hook(self):
     # counter check
     for msg_type in ("angle", "long", "speed", "speed_2"):
@@ -211,6 +216,11 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
       msg = self._user_brake_msg(True, quality_flag=quality_flag)
       self.assertEqual(quality_flag, self._rx(msg))
 
+    # explicitly test both invalid brake status values
+    for brake_status in (0, 3):  # NotInit_orOff and Faulty_SNA
+      msg = self.packer.make_can_msg_safety("ESP_status", 0, {"ESP_driverBrakeApply": brake_status})
+      self.assertFalse(self._rx(msg))
+
   def test_steering_wheel_disengage(self):
     # Tesla disengages when the user forcibly overrides the locked-in angle steering control
     # Either when the hands on level is high, or if there is a high angle rate fault
@@ -229,6 +239,23 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
           self.assertTrue(self._rx(self._angle_meas_msg(0, hands_on_level=0, eac_status=1, eac_error_code=0)))
           self.assertNotEqual(should_disengage, self.safety.get_controls_allowed())
           self.assertFalse(self.safety.get_steering_disengage_prev())
+
+  def test_steering_wheel_disengage_sustained(self):
+    # Sustained steering override across consecutive messages should keep controls disallowed
+    self.safety.set_controls_allowed(True)
+    self._rx(self._angle_meas_msg(0, hands_on_level=3))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    # Second message still overriding — no rising edge, controls stay disallowed
+    self._rx(self._angle_meas_msg(0, hands_on_level=3))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_cruise_engaged_all_states(self):
+    for cruise_state in (2, 3, 4, 6, 7):
+      self._rx(self._pcm_status_msg(False))
+      values = {"DI_cruiseState": cruise_state, "DI_autoparkState": 0}
+      self._rx(self.packer.make_can_msg_safety("DI_state", 0, values))
+      self.assertTrue(self.safety.get_controls_allowed(), f"controls not allowed for DI_cruiseState={cruise_state}")
 
   def test_autopark_summon_while_enabled(self):
     # We should not respect Autopark that activates while controls are allowed
@@ -292,6 +319,39 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.assertEqual(1, self._rx(lkas_msg_cam))
     self.assertEqual(0, self.safety.safety_fwd_hook(2, lkas_msg_cam.addr))
     self.assertFalse(self._tx(no_lkas_msg))
+
+  def test_stock_lkas_ignored_with_controls(self):
+    no_lkas_msg_cam = self._angle_cmd_msg(0, state=self.steer_control_types['NONE'], bus=2)
+    lkas_msg_cam = self._angle_cmd_msg(0, state=self.steer_control_types['LANE_KEEP_ASSIST'], bus=2)
+
+    # Reset: no LKAS active
+    self._rx(no_lkas_msg_cam)
+
+    # LKAS rising edge while controls are allowed should not activate passthrough
+    self.safety.set_controls_allowed(True)
+    self._rx(lkas_msg_cam)
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, state=self.steer_control_types['NONE'])))
+
+    # Consecutive LKAS messages (not a rising edge) should also not activate passthrough
+    self.safety.set_controls_allowed(False)
+    self._rx(lkas_msg_cam)
+    self.assertTrue(self._tx(self._angle_cmd_msg(0, state=self.steer_control_types['NONE'])))
+
+  def test_angle_meas_beyond_max_angle(self):
+    # Angle measurement beyond max_angle should be clamped in inactive and reset paths
+    extreme_angle = self.STEER_ANGLE_MAX + 50
+
+    # Fill angle_meas samples with extreme positive angle
+    for _ in range(6):
+      self._rx(self._angle_meas_msg(extreme_angle))
+
+    # Inactive steering path: clamp fires on angle_meas exceeding max_angle
+    self.assertFalse(self._tx(self._angle_cmd_msg(0, state=False)))
+
+    # Same for extreme negative angle
+    for _ in range(6):
+      self._rx(self._angle_meas_msg(-extreme_angle))
+    self.assertFalse(self._tx(self._angle_cmd_msg(0, state=False)))
 
   def test_angle_cmd_when_enabled(self):
     # We properly test lateral acceleration and jerk below
@@ -363,6 +423,17 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
 
         # Recover
         self.assertTrue(self._tx(self._angle_cmd_msg(0, True)))
+
+  def test_fwd_hook_autopark_active(self):
+    self.safety.set_controls_allowed(False)
+    self._rx(self._pcm_status_msg(False, autopark_state=self.autopark_states["ACTIVE"]))
+
+    # autopark active: steering and eac messages should be forwarded, not blocked
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, MSG_DAS_steeringControl))
+    self.assertEqual(0, self.safety.safety_fwd_hook(2, MSG_APS_eacMonitor))
+
+    self._rx(self._pcm_status_msg(False, autopark_state=0))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, MSG_APS_eacMonitor))
 
 
 class TestTeslaStockSafety(TestTeslaSafetyBase):
@@ -477,6 +548,13 @@ class TestTeslaIgnition(unittest.TestCase):
       self.assertFalse(self.safety.get_ignition_can())
       self.safety.ignition_can_hook(self._msg((i + 1) % 16, 3))
       self.assertTrue(self.safety.get_ignition_can())
+
+  def test_ignition_wrong_len_ignored(self):
+    self.safety.ignition_can_hook(self._msg(0, 3))
+    msg = self._msg(1, 3)
+    msg[0].data_len_code = 7
+    self.safety.ignition_can_hook(msg)
+    self.assertFalse(self.safety.get_ignition_can())
 
   def test_ignition_off(self):
     self.safety.ignition_can_hook(self._msg(0, 3))

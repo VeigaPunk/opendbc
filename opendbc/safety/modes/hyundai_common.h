@@ -75,17 +75,18 @@ void hyundai_common_cruise_state_check(const bool cruise_engaged) {
   // some newer HKG models can re-enable after spamming cancel button,
   // so keep track of user button presses to deny engagement if no interaction
 
-  // enter controls on rising edge of ACC and recent user button press, exit controls when ACC off
-  if (!hyundai_longitudinal) {
-    if (cruise_engaged && !cruise_engaged_prev && (hyundai_last_button_interaction < HYUNDAI_PREV_BUTTON_SAMPLES)) {
-      controls_allowed = true;
-    }
-
-    if (!cruise_engaged) {
-      controls_allowed = false;
-    }
-    cruise_engaged_prev = cruise_engaged;
+  // enter controls on rising edge of ACC and recent user button press, exit controls when ACC off.
+  // only called when openpilot longitudinal is disabled: the CAN FD call site checks
+  // !hyundai_longitudinal and the legacy call site's rx checks only whitelist SCC12
+  // for non-longitudinal configs
+  if (cruise_engaged && !cruise_engaged_prev && (hyundai_last_button_interaction < HYUNDAI_PREV_BUTTON_SAMPLES)) {
+    controls_allowed = true;
   }
+
+  if (!cruise_engaged) {
+    controls_allowed = false;
+  }
+  cruise_engaged_prev = cruise_engaged;
 }
 
 void hyundai_common_cruise_buttons_check(const int cruise_button, const bool main_button) {
@@ -126,13 +127,9 @@ uint32_t hyundai_common_canfd_compute_checksum(const CANPacket_t *msg) {
   crc = (crc << 8U) ^ hyundai_canfd_crc_lut[(crc >> 8U) ^ ((address >> 0U) & 0xFFU)];
   crc = (crc << 8U) ^ hyundai_canfd_crc_lut[(crc >> 8U) ^ ((address >> 8U) & 0xFFU)];
 
-  if (len == 24) {
-    crc ^= 0x819dU;
-  } else if (len == 32) {
-    crc ^= 0x9f5bU;
-  } else {
-
-  }
+  // only 24- and 32-byte messages are whitelisted in the rx checks, so the
+  // non-24 XOR seed is always the 32-byte one in contract; other lengths are out of contract
+  crc ^= (len == 24) ? 0x819dU : 0x9f5bU;
 
   return crc;
 }

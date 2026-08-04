@@ -63,15 +63,18 @@ static uint8_t hyundai_get_counter(const CANPacket_t *msg) {
   uint8_t cnt = 0;
   if (msg->addr == 0x260U) {
     cnt = (msg->data[7] >> 4) & 0x3U;
-  } else if (msg->addr == 0x386U) {
+  }
+  if (msg->addr == 0x386U) {
     cnt = ((msg->data[3] >> 6) << 2) | (msg->data[1] >> 6);
-  } else if (msg->addr == 0x394U) {
+  }
+  if (msg->addr == 0x394U) {
     cnt = (msg->data[1] >> 5) & 0x7U;
-  } else if (msg->addr == 0x421U) {
+  }
+  if (msg->addr == 0x421U) {
     cnt = msg->data[7] & 0xFU;
-  } else if (msg->addr == 0x4F1U) {
+  }
+  if (msg->addr == 0x4F1U) {
     cnt = (msg->data[3] >> 4) & 0xFU;
-  } else {
   }
   return cnt;
 }
@@ -81,13 +84,15 @@ static uint32_t hyundai_get_checksum(const CANPacket_t *msg) {
   uint8_t chksum = 0;
   if (msg->addr == 0x260U) {
     chksum = msg->data[7] & 0xFU;
-  } else if (msg->addr == 0x386U) {
+  }
+  if (msg->addr == 0x386U) {
     chksum = ((msg->data[7] >> 6) << 2) | (msg->data[5] >> 6);
-  } else if (msg->addr == 0x394U) {
+  }
+  if (msg->addr == 0x394U) {
     chksum = msg->data[6] & 0xFU;
-  } else if (msg->addr == 0x421U) {
+  }
+  if (msg->addr == 0x421U) {
     chksum = msg->data[7] >> 4;
-  } else {
   }
   return chksum;
 }
@@ -128,13 +133,12 @@ static uint32_t hyundai_compute_checksum(const CANPacket_t *msg) {
 
 static void hyundai_rx_hook(const CANPacket_t *msg) {
 
-  // SCC12 is on bus 2 for camera-based SCC cars, bus 0 on all others
+  // SCC12 is on bus 2 for camera-based SCC cars, bus 0 on all others;
+  // the rx checks only whitelist SCC12 on the expected bus for the current config
   if (msg->addr == 0x421U) {
-    if (((msg->bus == 0U) && !hyundai_camera_scc) || ((msg->bus == 2U) && hyundai_camera_scc)) {
-      // 2 bits: 13-14
-      int cruise_engaged = (GET_BYTES(msg, 0, 4) >> 13) & 0x3U;
-      hyundai_common_cruise_state_check(cruise_engaged);
-    }
+    // 2 bits: 13-14
+    int cruise_engaged = (GET_BYTES(msg, 0, 4) >> 13) & 0x3U;
+    hyundai_common_cruise_state_check(cruise_engaged);
   }
 
   if (msg->bus == 0U) {
@@ -152,15 +156,25 @@ static void hyundai_rx_hook(const CANPacket_t *msg) {
     }
 
     // gas press, different for EV, hybrid, and ICE models
-    if ((msg->addr == 0x371U) && hyundai_ev_gas_signal) {
-      gas_pressed = (((msg->data[4] & 0x7FU) << 1) | (msg->data[3] >> 7)) != 0U;
-    } else if ((msg->addr == 0x371U) && hyundai_hybrid_gas_signal) {
-      gas_pressed = msg->data[7] != 0U;
-    } else if ((msg->addr == 0x91U) && hyundai_fcev_gas_signal) {
-      gas_pressed = msg->data[6] != 0U;
-    } else if ((msg->addr == 0x260U) && !hyundai_ev_gas_signal && !hyundai_hybrid_gas_signal) {
-      gas_pressed = (msg->data[7] >> 6) != 0U;
-    } else {
+    // EV_GAS, HYBRID_GAS, and FCEV_GAS are mutually exclusive platform flags,
+    // so a single address/parse path is selected per car
+    uint32_t gas_addr = 0x260U;
+    if (hyundai_ev_gas_signal || hyundai_hybrid_gas_signal) {
+      gas_addr = 0x371U;
+    } else if (hyundai_fcev_gas_signal) {
+      gas_addr = 0x91U;
+    }
+
+    if (msg->addr == gas_addr) {
+      if (hyundai_ev_gas_signal) {
+        gas_pressed = (((msg->data[4] & 0x7FU) << 1) | (msg->data[3] >> 7)) != 0U;
+      } else if (hyundai_hybrid_gas_signal) {
+        gas_pressed = msg->data[7] != 0U;
+      } else if (hyundai_fcev_gas_signal) {
+        gas_pressed = msg->data[6] != 0U;
+      } else {
+        gas_pressed = (msg->data[7] >> 6) != 0U;
+      }
     }
 
     // sample wheel speed, averaging opposite corners

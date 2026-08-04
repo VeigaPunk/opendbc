@@ -62,6 +62,12 @@ class TestChryslerCuswSafety(common.CarSafetyTest, common.MotorTorqueSteeringSaf
       # can always cancel
       self.assertTrue(self._tx(self._button_msg(cancel=True)))
 
+  def test_no_button_pressed(self):
+    # neither cancel nor resume pressed: never allowed
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      self.assertFalse(self._tx(self._button_msg()))
+
   def test_rx_hook(self):
     for count in range(20):
       self.assertTrue(self._rx(self._speed_msg(0)), f"{count=}")

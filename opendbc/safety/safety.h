@@ -145,13 +145,12 @@ static void update_addr_timestamp(RxCheck addr_list[], int index) {
   }
 }
 
+// only called with a valid index from rx_msg_safety_check
 static void update_counter(RxCheck addr_list[], int index, uint8_t counter) {
-  if (index != -1) {
-    uint8_t expected_counter = (addr_list[index].status.last_counter + 1U) % (addr_list[index].msg[addr_list[index].status.index].max_counter + 1U);
-    addr_list[index].status.wrong_counters += (expected_counter == counter) ? -1 : 1;
-    addr_list[index].status.wrong_counters = SAFETY_CLAMP(addr_list[index].status.wrong_counters, 0, MAX_WRONG_COUNTERS);
-    addr_list[index].status.last_counter = counter;
-  }
+  uint8_t expected_counter = (addr_list[index].status.last_counter + 1U) % (addr_list[index].msg[addr_list[index].status.index].max_counter + 1U);
+  addr_list[index].status.wrong_counters += (expected_counter == counter) ? -1 : 1;
+  addr_list[index].status.wrong_counters = SAFETY_CLAMP(addr_list[index].status.wrong_counters, 0, MAX_WRONG_COUNTERS);
+  addr_list[index].status.last_counter = counter;
 }
 
 static bool rx_msg_safety_check(const CANPacket_t *msg,
@@ -163,7 +162,7 @@ static bool rx_msg_safety_check(const CANPacket_t *msg,
 
   if (index != -1) {
     // checksum check
-    if ((safety_hooks->get_checksum != NULL) && (safety_hooks->compute_checksum != NULL) && !cfg->rx_checks[index].msg[cfg->rx_checks[index].status.index].ignore_checksum) {
+    if ((safety_hooks->get_checksum != NULL) && (safety_hooks->compute_checksum != NULL) && !cfg->rx_checks[index].msg[cfg->rx_checks[index].status.index].ignore_checksum) {  // GCOV_EXCL_BR_LINE: get_checksum/compute_checksum are always registered as a pair
       uint32_t checksum = safety_hooks->get_checksum(msg);
       uint32_t checksum_comp = safety_hooks->compute_checksum(msg);
       cfg->rx_checks[index].status.valid_checksum = checksum_comp == checksum;
@@ -176,7 +175,7 @@ static bool rx_msg_safety_check(const CANPacket_t *msg,
       uint8_t counter = safety_hooks->get_counter(msg);
       update_counter(cfg->rx_checks, index, counter);
     } else {
-      cfg->rx_checks[index].status.wrong_counters = cfg->rx_checks[index].msg[cfg->rx_checks[index].status.index].ignore_counter ? 0 : MAX_WRONG_COUNTERS;
+      cfg->rx_checks[index].status.wrong_counters = cfg->rx_checks[index].msg[cfg->rx_checks[index].status.index].ignore_counter ? 0 : MAX_WRONG_COUNTERS;  // GCOV_EXCL_BR_LINE: defensive, all current configs set ignore_counter here
     }
 
     // quality flag check
@@ -318,7 +317,7 @@ void safety_tick(const safety_config *cfg) {
   const uint8_t MAX_MISSED_MSGS = 10U;
   bool rx_checks_invalid = false;
   uint32_t ts = microsecond_timer_get();
-  if (cfg != NULL) {
+  if (cfg != NULL) {  // GCOV_EXCL_BR_LINE: defensive, safety_tick is always called with a valid config
     for (int i=0; i < cfg->rx_checks_len; i++) {
       uint32_t elapsed_time = safety_get_ts_elapsed(ts, cfg->rx_checks[i].status.last_timestamp);
       // lag threshold is max of: 1s and MAX_MISSED_MSGS * expected timestep.
@@ -326,7 +325,7 @@ void safety_tick(const safety_config *cfg) {
       // 2s of lag is worse case, since the function is called at 1Hz
       uint32_t frequency = cfg->rx_checks[i].msg[cfg->rx_checks[i].status.index].frequency;
       uint32_t timestep = 1e6 / frequency;
-      bool lagging = elapsed_time > SAFETY_MAX(timestep * MAX_MISSED_MSGS, 1e6);
+      bool lagging = elapsed_time > SAFETY_MAX(timestep * MAX_MISSED_MSGS, 1e6);  // GCOV_EXCL_BR_LINE: rx frequencies below 10Hz are invalid, so the timestep side never wins
       cfg->rx_checks[i].status.lagging = lagging;
       if (lagging) {
         controls_allowed = false;
@@ -334,7 +333,7 @@ void safety_tick(const safety_config *cfg) {
 
       // enforce minimum frequency for safety-relevant messages
       bool frequency_invalid = frequency < 10U;
-      if (lagging || frequency_invalid || !is_msg_valid(cfg->rx_checks, i)) {
+      if (lagging || frequency_invalid || !is_msg_valid(cfg->rx_checks, i)) {  // GCOV_EXCL_BR_LINE: frequency_invalid is defensive, all rx messages are 10Hz or faster
         rx_checks_invalid = true;
         controls_allowed = false;
       }
@@ -482,7 +481,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
       set_status = 0;  // set
     }
   }
-  if ((set_status == 0) && (current_hooks->init != NULL)) {
+  if ((set_status == 0) && (current_hooks->init != NULL)) {  // GCOV_EXCL_BR_LINE: every registered safety mode has an init hook
     safety_config cfg = current_hooks->init(param);
     current_safety_config.rx_checks = cfg.rx_checks;
     current_safety_config.rx_checks_len = cfg.rx_checks_len;

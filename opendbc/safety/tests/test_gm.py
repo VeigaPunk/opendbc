@@ -70,6 +70,13 @@ class GmLongitudinalBase(common.CarSafetyTest, common.LongitudinalGasBrakeSafety
     self._rx(self._button_msg(Buttons.CANCEL))
     self.assertFalse(self.safety.get_controls_allowed())
 
+  def test_gas_apply_bit_without_controls(self):
+    for controls_allowed in (True, False):
+      self.safety.set_controls_allowed(controls_allowed)
+      # apply bit set with inactive gas value
+      msg = libsafety_py.make_CANPacket(0x2CB, 0, b"\x01\x02\xC0\x30\x00\x00\x00\x00")
+      self.assertEqual(controls_allowed, self._tx(msg))
+
 
 class TestGmSafetyBase(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTest):
   STANDSTILL_THRESHOLD = 10 * 0.0311
@@ -131,6 +138,13 @@ class TestGmSafetyBase(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTe
   def _button_msg(self, buttons):
     values = {"ACCButtons": buttons}
     return self.packer.make_can_msg_safety("ASCMSteeringButton", self.BUTTONS_BUS, values)
+
+  def test_individual_wheel_speeds(self):
+    for wheel in ["RL", "RR"]:
+      values = {"RLWheelSpd": 0, "RRWheelSpd": 0}
+      values["%sWheelSpd" % wheel] = self.STANDSTILL_THRESHOLD + 1
+      self._rx(self.packer.make_can_msg_safety("EBCMWheelSpdRear", 0, values))
+      self.assertTrue(self.safety.get_vehicle_moving(), f"vehicle not moving with {wheel} speed")
 
 
 class TestGmEVSafetyBase(TestGmSafetyBase):
@@ -200,6 +214,13 @@ class TestGmCameraSafety(TestGmCameraSafetyBase):
       self._rx(self._pcm_status_msg(enabled))
       self.assertEqual(enabled, self._tx(self._button_msg(Buttons.CANCEL)))
 
+  def test_buttons_rx_pcm_cruise(self):
+    # With PCM cruise, button state changes on bus 0 should not enable controls
+    self.safety.set_controls_allowed(False)
+    self._rx(self.packer.make_can_msg_safety("ASCMSteeringButton", 0, {"ACCButtons": Buttons.DECEL_SET}))
+    self._rx(self.packer.make_can_msg_safety("ASCMSteeringButton", 0, {"ACCButtons": Buttons.UNPRESS}))
+    self.assertFalse(self.safety.get_controls_allowed())
+
 
 class TestGmCameraEVSafety(TestGmCameraSafety, TestGmEVSafetyBase):
   pass
@@ -248,6 +269,14 @@ class TestGmIgnition(unittest.TestCase):
     self.safety.ignition_can_hook(self._msg(2))
     self.assertTrue(self.safety.get_ignition_can())
     self.safety.ignition_can_hook(self._msg(0))
+    self.assertFalse(self.safety.get_ignition_can())
+
+  def test_ignition_wrong_bus_ignored(self):
+    self.safety.ignition_can_hook(common.make_msg(1, 0x1F1, dat=b"\x02" + b"\x00" * 7))
+    self.assertFalse(self.safety.get_ignition_can())
+
+  def test_ignition_wrong_len_ignored(self):
+    self.safety.ignition_can_hook(common.make_msg(0, 0x1F1, dat=b"\x02" + b"\x00" * 6))
     self.assertFalse(self.safety.get_ignition_can())
 
 
