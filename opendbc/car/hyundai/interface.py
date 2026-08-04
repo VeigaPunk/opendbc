@@ -133,6 +133,21 @@ class CarInterface(CarInterfaceBase):
 
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.LONG.value
+
+      # Match stock button logic (commaai/openpilot#30950). CAN FD cars enable cruise on the
+      # main button's first rising edge. Cars with a pause/resume button also have a main
+      # button that toggles cruise.
+      # Detection prototype for the pause/resume button: the CAN FD DBC names
+      # CRUISE_BUTTONS/CRUISE_BUTTONS_ALT value 4 "pause_resume" (not "cancel"), so all
+      # CAN FD cars are assumed to have the pause/resume button. This correlation must be
+      # confirmed with a real-car route. HKG CAN cars have no such signal and are left
+      # undetected until route data identifies them (see issue checkbox 3).
+      if ret.flags & HyundaiFlags.CANFD:
+        ret.flags |= HyundaiFlags.PAUSE_RESUME.value
+      if ret.flags & (HyundaiFlags.CANFD | HyundaiFlags.PAUSE_RESUME):
+        ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.MAIN_TOGGLE_CRUISE.value
+      if ret.flags & HyundaiFlags.PAUSE_RESUME:
+        ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.PAUSE_RESUME.value
     if ret.flags & HyundaiFlags.HYBRID:
       ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.HYBRID_GAS.value
     elif ret.flags & HyundaiFlags.EV:

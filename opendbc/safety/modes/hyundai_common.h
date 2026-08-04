@@ -44,6 +44,21 @@ bool hyundai_alt_limits_2 = false;
 
 static uint8_t hyundai_last_button_interaction;  // button messages since the user pressed an enable button
 
+// Stock cruise button state matching (commaai/openpilot#30950):
+// the main button is only a gate on whether cruise is "available", it never
+// directly enables cruise (except on cars where it toggles cruise) and never
+// resets the set speed. Resume is only allowed once a set speed has been
+// stored since cruise became available.
+extern bool hyundai_main_toggles_cruise;
+bool hyundai_main_toggles_cruise = false;
+
+extern bool hyundai_pause_resume_button;
+bool hyundai_pause_resume_button = false;
+
+static bool hyundai_cruise_available;     // tracked state of the main button (toggled on rising edge)
+static bool hyundai_main_button_prev;
+static bool hyundai_cruise_speed_set;     // a set speed has been stored since cruise became available
+
 void hyundai_common_init(uint16_t param) {
   const uint16_t HYUNDAI_PARAM_EV_GAS = 1;
   const uint16_t HYUNDAI_PARAM_HYBRID_GAS = 2;
@@ -52,6 +67,8 @@ void hyundai_common_init(uint16_t param) {
   const uint16_t HYUNDAI_PARAM_ALT_LIMITS = 64; // TODO: shift this down with the rest of the common flags
   const uint16_t HYUNDAI_PARAM_FCEV_GAS = 256;
   const uint16_t HYUNDAI_PARAM_ALT_LIMITS_2 = 512;
+  const uint16_t HYUNDAI_PARAM_MAIN_TOGGLE_CRUISE = 1024;
+  const uint16_t HYUNDAI_PARAM_PAUSE_RESUME = 2048;
 
   hyundai_ev_gas_signal = GET_FLAG(param, HYUNDAI_PARAM_EV_GAS);
   hyundai_hybrid_gas_signal = !hyundai_ev_gas_signal && GET_FLAG(param, HYUNDAI_PARAM_HYBRID_GAS);
@@ -60,8 +77,15 @@ void hyundai_common_init(uint16_t param) {
   hyundai_alt_limits = GET_FLAG(param, HYUNDAI_PARAM_ALT_LIMITS);
   hyundai_fcev_gas_signal = GET_FLAG(param, HYUNDAI_PARAM_FCEV_GAS);
   hyundai_alt_limits_2 = GET_FLAG(param, HYUNDAI_PARAM_ALT_LIMITS_2);
+  hyundai_main_toggles_cruise = GET_FLAG(param, HYUNDAI_PARAM_MAIN_TOGGLE_CRUISE);
+  hyundai_pause_resume_button = GET_FLAG(param, HYUNDAI_PARAM_PAUSE_RESUME);
 
   hyundai_last_button_interaction = HYUNDAI_PREV_BUTTON_SAMPLES;
+
+  // stock cars require a main button press before cruise is available
+  hyundai_cruise_available = false;
+  hyundai_main_button_prev = false;
+  hyundai_cruise_speed_set = false;
 
 #ifdef ALLOW_DEBUG
   const uint16_t HYUNDAI_PARAM_LONGITUDINAL = 4;
@@ -96,20 +120,54 @@ void hyundai_common_cruise_buttons_check(const int cruise_button, const bool mai
   }
 
   if (hyundai_longitudinal) {
-    // enter controls on falling edge of resume or set
+    // main button is a gate on cruise availability, toggled on its rising edge.
+    // it has no other effect: it does not enable cruise (except on cars where it
+    // toggles cruise) and does not reset the stored set speed
+    bool main_pressed = main_button && !hyundai_main_button_prev;
+    if (main_pressed) {
+      hyundai_cruise_available = !hyundai_cruise_available;
+      if (!hyundai_cruise_available) {
+        // toggling main off disengages and clears the stored set speed
+        hyundai_cruise_speed_set = false;
+        controls_allowed = false;
+      } else if (hyundai_main_toggles_cruise) {
+        // cars whose main button toggles cruise enable on the first rising edge
+        controls_allowed = true;
+      } else {
+        // availability-only main button: turning cruise available never engages by itself
+      }
+    }
+
+    // a set speed is stored on SET while cruise is available
+    if ((cruise_button == HYUNDAI_BTN_SET) && hyundai_cruise_available) {
+      hyundai_cruise_speed_set = true;
+    }
+
+    // enter controls on falling edge of set, or resume only if a cruise speed is set
+    // (resume is not allowed immediately after toggling main/availability)
     bool set = (cruise_button != HYUNDAI_BTN_SET) && (cruise_button_prev == HYUNDAI_BTN_SET);
     bool res = (cruise_button != HYUNDAI_BTN_RESUME) && (cruise_button_prev == HYUNDAI_BTN_RESUME);
-    if (set || res) {
+    if (hyundai_cruise_available && (set || (res && hyundai_cruise_speed_set))) {
       controls_allowed = true;
     }
 
-    // exit controls on cancel press
-    if (cruise_button == HYUNDAI_BTN_CANCEL) {
+    // exit controls on cancel press. on cars with a pause/resume button, the button toggles cruise
+    // on its rising edge if cruise is available. only the engage direction requires a stored set
+    // speed: the pause direction must always work, otherwise cruise could be stuck on after a
+    // main-button engage with no set speed
+    bool cancel_pressed = (cruise_button == HYUNDAI_BTN_CANCEL) && (cruise_button_prev != HYUNDAI_BTN_CANCEL);
+    if (hyundai_pause_resume_button) {
+      // don't toggle again if a set/resume falling edge already acted on this transition
+      if (cancel_pressed && hyundai_cruise_available && (controls_allowed || hyundai_cruise_speed_set) && !set && !res) {
+        controls_allowed = !controls_allowed;
+      }
+    } else if (cruise_button == HYUNDAI_BTN_CANCEL) {
       controls_allowed = false;
     }
 
     cruise_button_prev = cruise_button;
   }
+  hyundai_main_button_prev = main_button;
 }
 
 uint32_t hyundai_common_canfd_compute_checksum(const CANPacket_t *msg) {

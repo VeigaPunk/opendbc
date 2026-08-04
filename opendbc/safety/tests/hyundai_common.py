@@ -77,6 +77,10 @@ class HyundaiLongitudinalBase(common.LongitudinalAccelSafetyTest):
   DISABLED_ECU_UDS_MSG: tuple[int, int]
   DISABLED_ECU_ACTUATION_MSG: tuple[int, int]
 
+  # set in subclasses for cars whose main button toggles cruise / have a pause-resume button
+  MAIN_TOGGLE_CRUISE = False
+  PAUSE_RESUME = False
+
   @classmethod
   def setUpClass(cls):
     if cls.__name__ == "HyundaiLongitudinalBase":
@@ -105,28 +109,181 @@ class HyundaiLongitudinalBase(common.LongitudinalAccelSafetyTest):
   def _accel_msg(self, accel, aeb_req=False, aeb_decel=0):
     raise NotImplementedError
 
+  def _enable_availability(self):
+    """
+      Press the main button (rising edge) so cruise becomes available, then store a
+      set speed with SET. Resets controls allowed so tests start from a known state.
+    """
+    self._rx(self._button_msg(Buttons.NONE, main_button=1))
+    self._rx(self._button_msg(Buttons.NONE, main_button=0))
+    self._rx(self._button_msg(Buttons.SET))
+    self._rx(self._button_msg(Buttons.NONE))
+    self.safety.set_controls_allowed(0)
+
   def test_set_resume_buttons(self):
     """
-      SET and RESUME enter controls allowed on their falling edge.
+      SET and RESUME enter controls allowed on their falling edge, but only while
+      cruise is available (main on) and a set speed has been stored.
     """
+    self._enable_availability()
     for btn_prev in range(8):
       for btn_cur in range(8):
         self._rx(self._button_msg(Buttons.NONE))
         self.safety.set_controls_allowed(0)
         for _ in range(10):
           self._rx(self._button_msg(btn_prev))
+          if self.PAUSE_RESUME:
+            # pause/resume button toggles on its rising edge, reset for the next sample
+            self.safety.set_controls_allowed(0)
           self.assertFalse(self.safety.get_controls_allowed())
 
-        # should enter controls allowed on falling edge and not transitioning to cancel
-        should_enable = btn_cur != btn_prev and \
-                        btn_cur != Buttons.CANCEL and \
-                        btn_prev in (Buttons.RESUME, Buttons.SET)
+        # should enter controls allowed on falling edge and not transitioning to cancel.
+        # on pause/resume cars, a cancel rising edge toggles cruise back on
+        should_enable = (btn_cur != btn_prev and
+                         btn_cur != Buttons.CANCEL and
+                         btn_prev in (Buttons.RESUME, Buttons.SET)) or \
+                        (self.PAUSE_RESUME and btn_cur == Buttons.CANCEL and btn_prev != Buttons.CANCEL)
 
         self._rx(self._button_msg(btn_cur))
         self.assertEqual(should_enable, self.safety.get_controls_allowed())
 
+  def test_main_button_availability_gate(self):
+    """
+      Main button is only a gate on cruise availability:
+      - set/resume have no effect while cruise is unavailable (main off)
+      - toggling main off disengages and blocks re-engagement
+    """
+    self.safety.set_controls_allowed(0)
+    for btn in (Buttons.SET, Buttons.RESUME):
+      self._rx(self._button_msg(btn))
+      self._rx(self._button_msg(Buttons.NONE))
+      self.assertFalse(self.safety.get_controls_allowed())
+
+    # main rising edge makes cruise available; it does not engage except on cars
+    # where the main button toggles cruise
+    self._rx(self._button_msg(Buttons.NONE, main_button=1))
+    self.assertEqual(self.MAIN_TOGGLE_CRUISE, self.safety.get_controls_allowed())
+    self._rx(self._button_msg(Buttons.NONE, main_button=0))
+
+    # now set engages
+    self._rx(self._button_msg(Buttons.SET))
+    self._rx(self._button_msg(Buttons.NONE))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    # toggling main off disengages and blocks engagement again
+    self._rx(self._button_msg(Buttons.NONE, main_button=1))
+    self._rx(self._button_msg(Buttons.NONE, main_button=0))
+    self.assertFalse(self.safety.get_controls_allowed())
+    for btn in (Buttons.SET, Buttons.RESUME):
+      self._rx(self._button_msg(btn))
+      self._rx(self._button_msg(Buttons.NONE))
+      self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_resume_requires_set_speed(self):
+    """
+      Resume is not allowed if no cruise speed has been set since cruise became available.
+    """
+    # cruise available, no set speed: resume must not engage
+    self._rx(self._button_msg(Buttons.NONE, main_button=1))
+    self._rx(self._button_msg(Buttons.NONE, main_button=0))
+    self.safety.set_controls_allowed(0)  # main button itself may engage on toggle-cruise cars
+    self._rx(self._button_msg(Buttons.RESUME))
+    self._rx(self._button_msg(Buttons.NONE))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    # store a set speed: set engages
+    self._rx(self._button_msg(Buttons.SET))
+    self._rx(self._button_msg(Buttons.NONE))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    # cancel keeps the set speed, so resume is allowed again
+    self._rx(self._button_msg(Buttons.CANCEL))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._button_msg(Buttons.NONE))
+    self._rx(self._button_msg(Buttons.RESUME))
+    self._rx(self._button_msg(Buttons.NONE))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    # toggling main off clears the set speed: resume is blocked again
+    for _ in range(2):
+      self._rx(self._button_msg(Buttons.NONE, main_button=1))
+      self._rx(self._button_msg(Buttons.NONE, main_button=0))
+      self.safety.set_controls_allowed(0)  # main button itself may engage on toggle-cruise cars
+    self._rx(self._button_msg(Buttons.RESUME))
+    self._rx(self._button_msg(Buttons.NONE))
+    self.assertFalse(self.safety.get_controls_allowed())
+
   def test_cancel_button(self):
     self.safety.set_controls_allowed(1)
+    self._rx(self._button_msg(Buttons.CANCEL))
+    if not self.PAUSE_RESUME:
+      self.assertFalse(self.safety.get_controls_allowed())
+    else:
+      # without cruise available, the pause/resume button does nothing
+      self.assertTrue(self.safety.get_controls_allowed())
+      # with cruise available and a set speed stored, it pauses
+      self._enable_availability()
+      self.safety.set_controls_allowed(1)
+      self._rx(self._button_msg(Buttons.NONE))
+      self._rx(self._button_msg(Buttons.CANCEL))
+      self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_main_toggle_cruise_button(self):
+    """
+      On cars whose main button toggles cruise (MAIN_TOGGLE_CRUISE), the first rising
+      edge of main enables cruise, and the next rising edge disables it.
+    """
+    if not self.MAIN_TOGGLE_CRUISE:
+      raise unittest.SkipTest
+
+    self.safety.set_controls_allowed(0)
+    # first rising edge enables
+    self._rx(self._button_msg(Buttons.NONE, main_button=1))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._button_msg(Buttons.NONE, main_button=0))
+    self.assertTrue(self.safety.get_controls_allowed())
+    # second rising edge disables
+    self._rx(self._button_msg(Buttons.NONE, main_button=1))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_pause_resume_toggles_cruise(self):
+    """
+      On cars with a pause/resume button (PAUSE_RESUME), the cancel button toggles
+      cruise on and off while cruise is available and a set speed is stored.
+    """
+    if not self.PAUSE_RESUME:
+      raise unittest.SkipTest
+
+    self._enable_availability()
+    # resume
+    self._rx(self._button_msg(Buttons.CANCEL))
+    self.assertTrue(self.safety.get_controls_allowed())
+    # holding the button must not oscillate
+    self._rx(self._button_msg(Buttons.CANCEL))
+    self.assertTrue(self.safety.get_controls_allowed())
+    # pause on the next press
+    self._rx(self._button_msg(Buttons.NONE))
+    self._rx(self._button_msg(Buttons.CANCEL))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_pause_resume_disengages_after_main_engage(self):
+    """
+      Regression: after a main-button engage with no stored set speed, the pause
+      direction of the pause/resume button must still disengage (engage-only gating
+      on the stored set speed).
+    """
+    if not (self.MAIN_TOGGLE_CRUISE and self.PAUSE_RESUME):
+      raise unittest.SkipTest
+
+    # main button engages with no set speed stored
+    self._rx(self._button_msg(Buttons.NONE, main_button=1))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._button_msg(Buttons.NONE, main_button=0))
+    # pause press must disengage even though no set speed was ever stored
+    self._rx(self._button_msg(Buttons.CANCEL))
+    self.assertFalse(self.safety.get_controls_allowed())
+    # and it must not re-engage until a set speed is stored
+    self._rx(self._button_msg(Buttons.NONE))
     self._rx(self._button_msg(Buttons.CANCEL))
     self.assertFalse(self.safety.get_controls_allowed())
 

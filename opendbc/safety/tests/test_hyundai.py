@@ -279,5 +279,18 @@ class TestHyundaiSafetyFCEVLong(TestHyundaiLongitudinalSafety, TestHyundaiSafety
     self.safety.init_tests()
 
 
+class TestHyundaiLongitudinalSafetyPauseResume(TestHyundaiLongitudinalSafety):
+  # CAN cars with a pause/resume button and a main button that toggles cruise (commaai/openpilot#30950)
+  MAIN_TOGGLE_CRUISE = True
+  PAUSE_RESUME = True
+
+  def setUp(self):
+    self.packer = CANPackerSafety("hyundai_can_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, HyundaiSafetyFlags.LONG |
+                                 HyundaiSafetyFlags.MAIN_TOGGLE_CRUISE | HyundaiSafetyFlags.PAUSE_RESUME)
+    self.safety.init_tests()
+
+
 if __name__ == "__main__":
   unittest.main()
